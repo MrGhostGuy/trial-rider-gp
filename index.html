@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Trial Rider GP — Physics Moto Trials</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#1a0f2e; font-family:'Segoe UI',Arial,sans-serif; }
+  #game { display:block; width:100%; height:100%; }
+  .hud { position:fixed; color:#fff; text-shadow:0 2px 6px rgba(0,0,0,.6); z-index:5; pointer-events:none; }
+  #title { top:10px; left:14px; font-size:20px; font-weight:800; letter-spacing:1px; }
+  #title span { color:#ffb347; }
+  #stats { top:12px; right:14px; text-align:right; font-size:15px; font-weight:600; line-height:1.5; }
+  #stats b { color:#ffd23f; font-variant-numeric:tabular-nums; }
+  #msg { top:34%; left:0; width:100%; text-align:center; font-size:34px; font-weight:800; color:#fff;
+         text-shadow:0 3px 12px rgba(0,0,0,.7); opacity:0; transition:opacity .25s; }
+  #msg small { display:block; font-size:16px; font-weight:600; color:#ffd23f; margin-top:6px; }
+  #progressWrap { bottom:64px; left:50%; transform:translateX(-50%); width:min(560px,72vw); height:8px;
+                  background:rgba(255,255,255,.18); border-radius:99px; }
+  #progressBar { height:100%; width:0%; background:linear-gradient(90deg,#ff7b00,#ffd23f); border-radius:99px; }
+  .tbtn { position:fixed; bottom:14px; z-index:6; width:64px; height:64px; border-radius:50%;
+          background:rgba(255,255,255,.14); border:2px solid rgba(255,255,255,.35); color:#fff;
+          font-size:13px; font-weight:800; display:flex; align-items:center; justify-content:center;
+          user-select:none; -webkit-user-select:none; touch-action:none; }
+  .tbtn.on { background:rgba(255,179,71,.55); }
+  #btnLeanL { left:14px; } #btnLeanR { left:90px; }
+  #btnBrake { right:90px; } #btnGas { right:14px; background:rgba(255,123,0,.30); }
+  #btnReset { top:64px; right:14px; width:44px; height:44px; font-size:11px; bottom:auto; }
+  @media (hover:hover) and (pointer:fine) { .tbtn { opacity:.55; } }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div class="hud" id="title">TRIAL <span>RIDER GP</span></div>
+<div class="hud" id="stats">TIME <b id="time">0.00</b><br>FAULTS <b id="faults">0</b> &nbsp; BEST <b id="best">--</b></div>
+<div class="hud" id="msg"></div>
+<div class="hud" id="progressWrap"><div id="progressBar"></div></div>
+<div class="tbtn" id="btnLeanL">◀ LEAN</div>
+<div class="tbtn" id="btnLeanR">LEAN ▶</div>
+<div class="tbtn" id="btnBrake">BRAKE</div>
+<div class="tbtn" id="btnGas">GAS</div>
+<div class="tbtn" id="btnReset">↺ R</div>
+<script>
+(function(){
+"use strict";
+var cvs = document.getElementById('game'), ctx = cvs.getContext('2d');
+var W = 0, H = 0;
+function resize(){ W = cvs.width = window.innerWidth; H = cvs.height = window.innerHeight; }
+window.addEventListener('resize', resize); resize();
+
+/* ---------- Track: control points (x, surfaceY) — y grows downward ---------- */
+var CTRL = [
+  [0,430],[520,430],[820,392],[1120,448],[1420,398],[1720,478],[2050,330],[2400,330],
+  [2680,252],[2920,252],[3010,214],[3080,208],[3240,318],[3400,392],[3620,430],[3900,300],[4060,262],[4300,392],
+  [4420,330],[4660,392],[4900,336],[5140,396],[5380,338],[5660,168],[5960,190],
+  [6260,190],[6560,428],[6900,392],[7240,448],[7580,398],[7920,452],[8260,428],[9000,428]
+];
+var PTS = [];
+(function buildTrack(){
+  function cr(p0,p1,p2,p3,t){
+    var t2=t*t, t3=t2*t;
+    return 0.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);
+  }
+  for (var i=0;i<CTRL.length-1;i++){
+    var p0=CTRL[Math.max(0,i-1)], p1=CTRL[i], p2=CTRL[i+1], p3=CTRL[Math.min(CTRL.length-1,i+2)];
+    var steps = Math.max(4, Math.round((p2[0]-p1[0])/12));
+    for (var s=0;s<steps;s++){
+      var t=s/steps;
+      PTS.push([cr(p0[0],p1[0],p2[0],p3[0],t), cr(p0[1],p1[1],p2[1],p3[1],t)]);
+    }
+  }
+  PTS.push(CTRL[CTRL.length-1].slice());
+})();
+var TRACK_END = 8620, FINISH_X = 8500;
+var CHECKPOINTS = [1250, 2650, 4250, 5850, 7250];
+function groundY(x){
+  if (x <= PTS[0][0]) return PTS[0][1];
+  if (x >= PTS[PTS.length-1][0]) return PTS[PTS.length-1][1];
+  var lo=0, hi=PTS.length-1;
+  while (hi-lo>1){ var mid=(lo+hi)>>1; if (PTS[mid][0]<=x) lo=mid; else hi=mid; }
+  var a=PTS[lo], b=PTS[hi], t=(x-a[0])/(b[0]-a[0]);
+  return a[1]+(b[1]-a[1])*t;
+}
+function groundAngle(x){
+  var d=14, y1=groundY(x-d), y2=groundY(x+d);
+  return Math.atan2(y2-y1, 2*d);
+}
+
+/* ---------- Bike ---------- */
+var WB = 56, WR = 17, GRAV = 1500;
+var bike, input = { gas:0, brake:0, lean:0 };
+var cam = { x:0, y:0 };
+var state = 'ready'; // ready | run | crash | win
+var timeMs = 0, faults = 0, bestMs = null, cpIndex = 0, msgTimer = 0, crashTimer = 0, startStamp = 0;
+var wheelSpin = 0;
+
+function spawn(x){
+  var gy = groundY(x);
+  bike = { x:x, y:gy-30, vx:0, vy:0, ang:groundAngle(x), av:0, grounded:false };
+  cam.x = bike.x - W*0.36; cam.y = bike.y - H*0.55;
+}
+spawn(120);
+
+function wheelPos(sign){
+  var c = Math.cos(bike.ang), s = Math.sin(bike.ang);
+  return { x: bike.x + c*sign*WB/2 - s*4, y: bike.y + s*sign*WB/2 + c*4 };
+}
+function step(dt){
+  var sub = 4, sdt = dt/sub;
+  for (var n=0;n<sub;n++){
+    bike.vy += GRAV*sdt;
+    // lean torque (stronger in air)
+    var leanPow = bike.grounded ? 3.2 : 7.5;
+    bike.av += input.lean * leanPow * sdt * 3.0;
+    bike.av *= (1 - (bike.grounded ? 3.2 : 0.55)*sdt);
+    bike.ang += bike.av*sdt;
+    bike.x += bike.vx*sdt; bike.y += bike.vy*sdt;
+    if (bike.x < 40){ bike.x = 40; bike.vx = Math.max(0, bike.vx); }
+    var contacts = 0, rearG = false;
+    [-1,1].forEach(function(sign){
+      var w = wheelPos(sign);
+      var gy = groundY(w.x), pen = (w.y + WR) - gy;
+      if (pen > 0){
+        contacts++;
+        if (sign === 1) rearG = true;
+        var ga = groundAngle(w.x), nx = Math.sin(ga), ny = -Math.cos(ga);
+        // push out along normal
+        bike.x += nx*pen*0.55; bike.y += ny*pen*0.55;
+        // kill velocity into the ground
+        var vn = bike.vx*nx + bike.vy*ny;
+        if (vn < 0){ bike.vx -= nx*vn; bike.vy -= ny*vn; }
+        // rolling resistance / grip
+        bike.vx *= (1 - 0.25*sdt);
+        // drive / brake along tangent
+        var tx = Math.cos(ga), ty = Math.sin(ga);
+        if (sign === 1){
+          if (input.gas){ bike.vx += tx*1750*sdt; bike.vy += ty*1750*sdt; }
+          if (input.brake){
+            var sp = bike.vx*tx + bike.vy*ty;
+            if (sp > 30){ bike.vx -= tx*1900*sdt; bike.vy -= ty*1900*sdt; }
+            else { bike.vx -= tx*620*sdt; bike.vy -= ty*620*sdt; } // reverse creep
+          }
+        }
+        // head check uses post-push position
+      }
+    });
+    bike.grounded = contacts > 0;
+    if (bike.grounded){
+      // soft-align chassis to the slope under it (suspension feel)
+      var wf = wheelPos(-1), wr = wheelPos(1);
+      var slopeA = Math.atan2(groundY(wr.x) - groundY(wf.x), wr.x - wf.x);
+      var diff = normAng(slopeA - bike.ang);
+      bike.av += diff * 14 * sdt;
+      bike.ang += diff * 6 * sdt;
+    }
+    wheelSpin += (bike.vx * sdt) / WR;
+    // rider head check: head offset (0,-26) rotated by chassis angle
+    var ox = 0, oy = -26;
+    var rx = ox*Math.cos(bike.ang) - oy*Math.sin(bike.ang);
+    var ry = ox*Math.sin(bike.ang) + oy*Math.cos(bike.ang);
+    var hX = bike.x + rx, hY = bike.y + ry;
+    if (state === 'run' && hY > groundY(hX) - 2){
+      doCrash();
+    }
+    if (bike.y > 1400){ doCrash(); } // fell into a pit somehow
+  }
+}
+function normAng(a){ while(a>Math.PI)a-=2*Math.PI; while(a<-Math.PI)a+=2*Math.PI; return a; }
+function doCrash(){
+  if (state !== 'run') return;
+  state = 'crash'; crashTimer = 1.1; faults++;
+  showMsg('💥 CRASH!', 'Fault ' + faults + ' — back to checkpoint');
+  document.getElementById('faults').textContent = faults;
+}
+function respawn(){
+  var x = cpIndex === 0 ? 120 : CHECKPOINTS[cpIndex-1] + 30;
+  spawn(x); state = 'run'; startStamp = performance.now() - timeMs;
+}
+function showMsg(t, sub){
+  var m = document.getElementById('msg');
+  m.innerHTML = t + (sub ? '<small>' + sub + '</small>' : '');
+  m.style.opacity = 1; msgTimer = 1.6;
+}
+
+/* ---------- Input ---------- */
+var keys = {};
+window.addEventListener('keydown', function(e){ keys[e.code] = true; syncKeys();
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].indexOf(e.code)>=0) e.preventDefault();
+  if (e.code === 'KeyR'){ if (state==='run'||state==='crash'){ timeMs = performance.now()-startStamp; doCrash(); } }
+});
+window.addEventListener('keyup', function(e){ keys[e.code] = false; syncKeys(); });
+function syncKeys(){
+  input.gas = (keys['KeyW'] || keys['ArrowUp'] || keys['Space']) ? 1 : (touch.gas ? 1 : 0);
+  input.brake = (keys['KeyS'] || keys['ArrowDown']) ? 1 : (touch.brake ? 1 : 0);
+  var l = (keys['KeyA'] || keys['ArrowLeft']) ? 1 : 0, r = (keys['KeyD'] || keys['ArrowRight']) ? 1 : 0;
+  input.lean = (touch.lean !== 0) ? touch.lean : (r ? 1 : 0) - (l ? 1 : 0); // D/right = lean forward, A/left = lean back
+}
+var touch = { gas:0, brake:0, lean:0 };
+function bindBtn(id, on, off){
+  var el = document.getElementById(id);
+  function dn(e){ e.preventDefault(); el.classList.add('on'); on(); syncKeys(); }
+  function up(e){ e.preventDefault(); el.classList.remove('on'); off(); syncKeys(); }
+  el.addEventListener('pointerdown', dn); el.addEventListener('pointerup', up);
+  el.addEventListener('pointerleave', up); el.addEventListener('pointercancel', up);
+}
+bindBtn('btnGas', function(){ touch.gas = 1; }, function(){ touch.gas = 0; });
+bindBtn('btnBrake', function(){ touch.brake = 1; }, function(){ touch.brake = 0; });
+bindBtn('btnLeanL', function(){ touch.lean = -1; }, function(){ if (touch.lean === -1) touch.lean = 0; });
+bindBtn('btnLeanR', function(){ touch.lean = 1; }, function(){ if (touch.lean === 1) touch.lean = 0; });
+document.getElementById('btnReset').addEventListener('pointerdown', function(e){ e.preventDefault();
+  if (state === 'run'){ doCrash(); } });
+
+/* ---------- Game flow ---------- */
+function update(dt){
+  syncKeys();
+  if (state === 'ready'){
+    if (input.gas){ state = 'run'; startStamp = performance.now(); timeMs = 0; showMsg('GO!', ''); }
+  } else if (state === 'run'){
+    timeMs = performance.now() - startStamp;
+    step(dt);
+    while (cpIndex < CHECKPOINTS.length && bike.x > CHECKPOINTS[cpIndex]){
+      cpIndex++; showMsg('✔ CHECKPOINT ' + cpIndex, '');
+    }
+    if (bike.x > FINISH_X){
+      state = 'win';
+      var t = timeMs/1000;
+      if (bestMs === null || timeMs < bestMs){ bestMs = timeMs; document.getElementById('best').textContent = t.toFixed(2); }
+      showMsg('🏁 FINISH! ' + t.toFixed(2) + 's', faults + ' faults — press GAS to ride again');
+    }
+    document.getElementById('time').textContent = (timeMs/1000).toFixed(2);
+    document.getElementById('progressBar').style.width = Math.min(100, bike.x/FINISH_X*100) + '%';
+  } else if (state === 'crash'){
+    crashTimer -= dt;
+    step(dt*0.25);
+    if (crashTimer <= 0) respawn();
+  } else if (state === 'win'){
+    step(dt*0.4);
+    if (input.gas && msgTimer <= 0){ faults = 0; cpIndex = 0; document.getElementById('faults').textContent = 0; spawn(120); state='ready'; }
+  }
+  if (msgTimer > 0){ msgTimer -= dt; if (msgTimer <= 0) document.getElementById('msg').style.opacity = 0; }
+  // camera
+  var tx = bike.x - W*0.36 + bike.vx*0.22, ty = bike.y - H*0.55;
+  cam.x += (tx - cam.x) * Math.min(1, dt*5);
+  cam.y += (ty - cam.y) * Math.min(1, dt*4);
+  if (cam.x < 0) cam.x = 0;
+}
+
+/* ---------- Drawing ---------- */
+function draw(){
+  var sky = ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#2b1055'); sky.addColorStop(0.55,'#7597de'); sky.addColorStop(1,'#ff9a5a');
+  ctx.fillStyle = sky; ctx.fillRect(0,0,W,H);
+  // sun
+  ctx.fillStyle = 'rgba(255,210,90,.9)';
+  ctx.beginPath(); ctx.arc(W*0.78, H*0.2, 40, 0, 7); ctx.fill();
+  // parallax ridges
+  drawRidge(0.25, '#4a2a7a', 0.55, 130);
+  drawRidge(0.5, '#5d3a8a', 0.75, 90);
+  var x0 = Math.max(0, cam.x - 60), x1 = cam.x + W + 60;
+  // dirt body
+  ctx.beginPath();
+  ctx.moveTo(x0 - cam.x, groundY(x0) - cam.y);
+  for (var x = x0; x <= x1; x += 8) ctx.lineTo(x - cam.x, groundY(x) - cam.y);
+  ctx.lineTo(x1 - cam.x, H + 200); ctx.lineTo(x0 - cam.x, H + 200); ctx.closePath();
+  var dirt = ctx.createLinearGradient(0, H*0.3, 0, H);
+  dirt.addColorStop(0,'#8a5a2b'); dirt.addColorStop(1,'#4a2c10');
+  ctx.fillStyle = dirt; ctx.fill();
+  // grass/top edge
+  ctx.beginPath();
+  for (var x2 = x0; x2 <= x1; x2 += 8){ var y = groundY(x2) - cam.y; if (x2===x0) ctx.moveTo(x2-cam.x, y); else ctx.lineTo(x2-cam.x, y); }
+  ctx.strokeStyle = '#3f9e4d'; ctx.lineWidth = 7; ctx.stroke();
+  ctx.strokeStyle = 'rgba(0,0,0,.25)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var x3 = x0; x3 <= x1; x3 += 8){ var y3 = groundY(x3) - cam.y + 6; if (x3===x0) ctx.moveTo(x3-cam.x, y3); else ctx.lineTo(x3-cam.x, y3); }
+  ctx.stroke();
+  // checkpoint flags
+  CHECKPOINTS.forEach(function(cx, i){
+    if (cx < x0 || cx > x1) return;
+    var gy = groundY(cx) - cam.y, sx = cx - cam.x;
+    ctx.strokeStyle = i < cpIndex ? '#7CFC00' : '#fff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(sx, gy); ctx.lineTo(sx, gy - 74); ctx.stroke();
+    ctx.fillStyle = i < cpIndex ? '#7CFC00' : '#ffd23f';
+    ctx.beginPath(); ctx.moveTo(sx, gy - 74); ctx.lineTo(sx + 26, gy - 64); ctx.lineTo(sx, gy - 54); ctx.closePath(); ctx.fill();
+  });
+  // finish arch
+  if (FINISH_X > x0 && FINISH_X < x1 + 200){
+    var fy = groundY(FINISH_X) - cam.y, fx = FINISH_X - cam.x;
+    ctx.fillStyle = '#222';
+    ctx.fillRect(fx - 6, fy - 130, 10, 130); ctx.fillRect(fx + 86, fy - 130, 10, 130);
+    for (var r = 0; r < 2; r++) for (var c = 0; c < 8; c++){
+      ctx.fillStyle = (r + c) % 2 ? '#fff' : '#111';
+      ctx.fillRect(fx - 6 + c*13, fy - 130 + r*12, 13, 12);
+    }
+    ctx.fillStyle = '#fff'; ctx.font = '800 15px Arial'; ctx.fillText('FINISH', fx + 6, fy - 96);
+  }
+  drawBike();
+  if (state === 'ready'){
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(0, H*0.36, W, 86);
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'center';
+    ctx.font = '800 26px Arial'; ctx.fillText('TRIAL RIDER GP', W/2, H*0.36 + 36);
+    ctx.font = '600 15px Arial'; ctx.fillStyle = '#ffd23f';
+    ctx.fillText('W / ↑ = GAS · S / ↓ = BRAKE · A,D / ←,→ = LEAN · R = RESET', W/2, H*0.36 + 62);
+    ctx.textAlign = 'left';
+  }
+}
+function drawRidge(par, color, baseY, amp){
+  ctx.fillStyle = color; ctx.beginPath(); ctx.moveTo(0, H);
+  for (var sx = 0; sx <= W; sx += 16){
+    var wx = sx + cam.x * par;
+    var y = H*baseY - (Math.sin(wx*0.004)*amp*0.6 + Math.sin(wx*0.0113)*amp*0.4);
+    ctx.lineTo(sx, y);
+  }
+  ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+}
+function drawBike(){
+  var bx = bike.x - cam.x, by = bike.y - cam.y;
+  ctx.save(); ctx.translate(bx, by); ctx.rotate(bike.ang);
+  // wheels
+  [-WB/2, WB/2].forEach(function(wx){
+    ctx.save(); ctx.translate(wx, 4); ctx.rotate(wheelSpin + (wx<0?0.4:0));
+    ctx.fillStyle = '#191919'; ctx.beginPath(); ctx.arc(0,0,WR,0,7); ctx.fill();
+    ctx.fillStyle = '#bbb'; ctx.beginPath(); ctx.arc(0,0,6,0,7); ctx.fill();
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 2.5;
+    for (var i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(-WR+3,0); ctx.lineTo(WR-3,0); ctx.stroke(); ctx.rotate(Math.PI/3); }
+    ctx.restore();
+  });
+  // frame
+  ctx.strokeStyle = '#ff7b00'; ctx.lineWidth = 5; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-WB/2, 4); ctx.lineTo(-6, -12); ctx.lineTo(16, -14); ctx.lineTo(WB/2, 4); ctx.stroke();
+  ctx.strokeStyle = '#222'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(16, -14); ctx.lineTo(26, -22); ctx.stroke();
+  ctx.fillStyle = '#ff7b00'; ctx.beginPath(); ctx.arc(2, -8, 8, 0, 7); ctx.fill(); // tank/engine blob
+  // rider
+  ctx.strokeStyle = '#2456c8'; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(-2, -12); ctx.lineTo(-8, -30); ctx.stroke();          // torso
+  ctx.beginPath(); ctx.moveTo(-8, -30); ctx.lineTo(20, -20); ctx.stroke();          // arm to bars
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 5.5;
+  ctx.beginPath(); ctx.moveTo(-2, -12); ctx.lineTo(-16, 0); ctx.stroke();           // rear leg
+  ctx.beginPath(); ctx.moveTo(-2, -12); ctx.lineTo(10, -2); ctx.stroke();           // front leg
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(-9, -38, 9.5, 0, 7); ctx.fill(); // helmet
+  ctx.fillStyle = '#ff7b00'; ctx.beginPath(); ctx.arc(-9, -38, 9.5, Math.PI*1.05, Math.PI*1.95); ctx.fill();
+  ctx.restore();
+  if (state === 'crash'){
+    ctx.fillStyle = 'rgba(255,60,30,.18)'; ctx.fillRect(0,0,W,H);
+  }
+}
+
+/* ---------- Main loop ---------- */
+var lastT = performance.now();
+function frame(now){
+  var dt = Math.min(0.033, (now - lastT)/1000); lastT = now;
+  syncKeys();
+  update(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+/* test hook */
+window.__game = {
+  get: function(){ return { state: state, x: bike.x, y: bike.y, vx: bike.vx, faults: faults, cp: cpIndex,
+                            ang: bike.ang, nan: !isFinite(bike.x + bike.y + bike.vx + bike.vy) }; },
+  setInput: function(k, v){ keys[k] = v; },
+  step: function(dt){ update(dt); }
+};
+})();
+</script>
+</body>
+</html>
